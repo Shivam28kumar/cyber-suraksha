@@ -11,57 +11,143 @@ from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS, cross_origin
 
-# Google Cloud libraries
+# Google Cloud imports
+from google.oauth2 import service_account
+from google.cloud import dialogflow
 import gspread
 from google.oauth2.service_account import Credentials
-from google.auth.transport.requests import Request as GoogleAuthRequest
-from google.oauth2 import service_account
 
-# --- 2. App Initialization & CORS Configuration ---
+# --- 2. Initialize Flask App ---
 app = Flask(__name__, static_folder='static')
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 
-# --- 3. Configuration Variables ---
-PROJECT_ID = "i4c-final-project-6"
-LOCATION = "asia-south1"
-AGENT_ID = "bda082c9-bcfc-4b5b-8eed-21ea49516592"
-SHEET_NAME = "I4C-Final-Reports"
-CREDENTIALS_FILE = 'credentials.json'
-SCOPES = [
-    'https://www.googleapis.com/auth/cloud-platform', 'https://www.googleapis.com/auth/dialogflow',
-    'https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'
-]
-COLUMN_ORDER = [
-    'Reference_ID', 'complaint_subcategory', 'incident_datetime', 'delay_in_reporting', 'delay_reason',
-    'incident_description', 'victim_account_type', 'victim_bank_name', 'victim_account_id', 'transaction_id',
-    'amount_lost', 'Transaction_date', 'victim_name', 'victim_mobile', 'Gender', 'Age', 'Address',
-    'pin_code', 'district', 'police_station', 'victim_email'
-]
-
-# --- 4. Helper Functions ---
-def get_gspread_client():
-    """Authenticates for Google Sheets."""
+# --- 3. Google Cloud Configuration ---
+def get_google_credentials():
+    """Get Google credentials from environment variable or file"""
     try:
-        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-        return gspread.authorize(creds)
+        # Try to get credentials from environment variable first (for Railway)
+        credentials_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+        if credentials_json:
+            # Parse the JSON string from environment variable
+            credentials_info = json.loads(credentials_json)
+            return service_account.Credentials.from_service_account_info(
+                credentials_info,
+                scopes=[
+                    'https://www.googleapis.com/auth/cloud-platform',
+                    'https://www.googleapis.com/auth/spreadsheets'
+                ]
+            )
+        else:
+            # Fallback to local file (for local development)
+            return service_account.Credentials.from_service_account_file(
+                'credentials.json',
+                scopes=[
+                    'https://www.googleapis.com/auth/cloud-platform',
+                    'https://www.googleapis.com/auth/spreadsheets'
+                ]
+            )
     except Exception as e:
-        print(f"Error getting gspread client: {e}")
+        print(f"Error loading Google credentials: {e}")
         return None
 
-def get_dialogflow_access_token():
-    """Creates a short-lived access token for calling the Dialogflow API."""
+# Initialize credentials
+credentials = get_google_credentials()
+if not credentials:
+    print("WARNING: Google credentials not found!")
+
+# Dialogflow Configuration
+PROJECT_ID = "i4c-final-project-6"  # Replace with your actual project ID
+LANGUAGE_CODE = "en"
+
+# Google Sheets Configuration
+SPREADSHEET_ID = "1iN6xKHlgXTF_xOjkPTwTsUHJbY8Kpb6aRLiVbLy7rKw"  # Replace with your spreadsheet ID
+
+# Initialize Google Sheets client
+def get_sheets_client():
+    """Initialize Google Sheets client"""
     try:
-        creds = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-        creds.refresh(GoogleAuthRequest())
-        return creds.token
+        if credentials:
+            return gspread.authorize(credentials)
+        return None
     except Exception as e:
-        print(f"Error getting Dialogflow token: {e}")
+        print(f"Error initializing Sheets client: {e}")
         return None
 
-# --- 5. Routes ---
+sheets_client = get_sheets_client()
+
+# --- 4. Utility Functions ---
+def get_dialogflow_response(user_message, session_id):
+    """Send message to Dialogflow and get response"""
+    try:
+        if not credentials:
+            return "I'm having trouble accessing my AI services. Please try again later."
+        
+        # Create Dialogflow session client
+        session_client = dialogflow.SessionsClient(credentials=credentials)
+        session_path = session_client.session_path(PROJECT_ID, session_id)
+        
+        # Add current date context
+        current_date = datetime.now().strftime("%B %d, %Y")
+        contextual_message = f"System instruction: For context, the current date is {current_date}. User message: {user_message}"
+        
+        print(f"Sending to Dialogflow: '{contextual_message}'")
+        
+        # Create text input
+        text_input = dialogflow.TextInput(text=contextual_message, language_code=LANGUAGE_CODE)
+        query_input = dialogflow.QueryInput(text=text_input)
+        
+        # Get response from Dialogflow
+        response = session_client.detect_intent(
+            request={"session": session_path, "query_input": query_input}
+        )
+        
+        bot_response = response.query_result.fulfillment_text
+        print(f"Dialogflow response: {bot_response}")
+        
+        return bot_response
+        
+    except Exception as e:
+        print(f"Error getting Dialogflow response: {e}")
+        return "I'm having trouble processing your request. Please try again."
+
+def save_to_sheets(complaint_data):
+    """Save complaint data to Google Sheets"""
+    try:
+        if not sheets_client:
+            print("Sheets client not available")
+            return False
+            
+        sheet = sheets_client.open_by_key(SPREADSHEET_ID).sheet1
+        
+        # Prepare row data
+        row_data = [
+            complaint_data.get('timestamp', ''),
+            complaint_data.get('complaint_id', ''),
+            complaint_data.get('name', ''),
+            complaint_data.get('email', ''),
+            complaint_data.get('phone', ''),
+            complaint_data.get('crime_type', ''),
+            complaint_data.get('description', ''),
+            complaint_data.get('amount_lost', ''),
+            complaint_data.get('location', ''),
+            complaint_data.get('suspect_info', ''),
+            complaint_data.get('evidence', ''),
+            complaint_data.get('status', 'Submitted')
+        ]
+        
+        # Add row to sheet
+        sheet.append_row(row_data)
+        print(f"Complaint saved to sheets: {complaint_data.get('complaint_id')}")
+        return True
+        
+    except Exception as e:
+        print(f"Error saving to sheets: {e}")
+        return False
+
+# --- 5. Flask Routes ---
 @app.route('/')
-def home():
-    """Serve the main page"""
+def index():
+    """Serve the main HTML page"""
     return send_from_directory('static', 'index.html')
 
 @app.route('/<path:filename>')
@@ -69,98 +155,100 @@ def serve_static(filename):
     """Serve static files"""
     return send_from_directory('static', filename)
 
-@app.route('/health')
-def health_check():
-    """Health check endpoint"""
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
-
-@app.route('/chat', methods=['POST', 'OPTIONS'])
+@app.route('/chat', methods=['POST'])
 @cross_origin()
-def chat_handler():
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'}), 200
-
-    if request.method == 'POST':
-        try:
-            data = request.get_json()
-            if not data:
-                return jsonify({"error": "No JSON data received"}), 400
-                
-            user_input = data.get('message')
-            if not user_input:
-                return jsonify({"error": "No message provided"}), 400
-                
-            session_id = data.get('session_id', str(uuid.uuid4()))
-
-            # Date grounding fix
-            current_date_for_llm = datetime.now().strftime('%B %d, %Y')
-            final_input_for_dialogflow = f"System instruction: For context, the current date is {current_date_for_llm}. User message: {user_input}"
-            print(f"Sending to Dialogflow: '{final_input_for_dialogflow}'")
-            
-            access_token = get_dialogflow_access_token()
-            if not access_token:
-                return jsonify({"response": "Service temporarily unavailable. Please try again."}), 503
-
-            dialogflow_url = (
-                f"https://{LOCATION}-dialogflow.googleapis.com/v3/projects/{PROJECT_ID}/locations/{LOCATION}/agents/{AGENT_ID}/sessions/{session_id}:detectIntent")
-
-            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-            payload = {
-                "queryInput": {
-                    "text": {
-                        "text": final_input_for_dialogflow
-                    },
-                    "languageCode": "en"
-                }
-            }
-
-            response = requests.post(dialogflow_url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-
-            response_data = response.json()
-            messages = response_data.get("queryResult", {}).get("responseMessages", [])
-            bot_response = " ".join(" ".join(msg.get("text", {}).get("text", [])) for msg in messages if "text" in msg)
-            if not bot_response: 
-                bot_response = "I'm sorry, I could not process a response."
-
-            return jsonify({"response": bot_response, "session_id": session_id})
-
-        except Exception as e:
-            print(f"Chat handler error: {e}")
-            return jsonify({"response": "Sorry, an error occurred. Please try again."}), 500
+def chat():
+    """Handle chat messages"""
+    try:
+        data = request.get_json()
+        user_message = data.get('message', '').strip()
+        session_id = data.get('session_id') or str(uuid.uuid4())
+        
+        if not user_message:
+            return jsonify({
+                'response': 'Please enter a message.',
+                'session_id': session_id
+            })
+        
+        # Get response from Dialogflow
+        bot_response = get_dialogflow_response(user_message, session_id)
+        
+        return jsonify({
+            'response': bot_response,
+            'session_id': session_id
+        })
+        
+    except Exception as e:
+        print(f"Error in chat endpoint: {e}")
+        return jsonify({
+            'response': 'I encountered an error processing your message. Please try again.',
+            'session_id': session_id if 'session_id' in locals() else str(uuid.uuid4())
+        }), 503
 
 @app.route('/webhook', methods=['POST'])
 @cross_origin()
-def i4c_playbook_webhook():
+def webhook():
+    """Handle Dialogflow webhook requests"""
     try:
-        req = request.get_json(force=True)
-        params = req
-        print("Webhook received with params:", json.dumps(params, indent=2))
-
-        client = get_gspread_client()
-        if not client:
-            error_text = "Sorry, unable to connect to database."
-            return jsonify({"fulfillment_response": {"messages": [{"text": {"text": [error_text]}}]}})
-
-        sheet = client.open(SHEET_NAME).sheet1
-
-        timestamp = int(time.time())
-        random_suffix = ''.join(random.choices('0123456789ABCDEF', k=6))
-        reference_id = f"I4C-{timestamp}-{random_suffix}"
-
-        row_data = [reference_id] + [str(params.get(col, 'N/A')) for col in COLUMN_ORDER[1:]]
-        sheet.append_row(row_data)
-
-        response_text = f"Thank you, your report has been recorded successfully. Your official Reference ID is {reference_id}."
-        response_payload = {"fulfillment_response": {"messages": [{"text": {"text": [response_text]}}]}}
-        return jsonify(response_payload)
+        req = request.get_json()
+        
+        # Extract intent and parameters
+        intent_name = req.get('queryResult', {}).get('intent', {}).get('displayName', '')
+        parameters = req.get('queryResult', {}).get('parameters', {})
+        
+        print(f"Webhook received intent: {intent_name}")
+        print(f"Parameters: {parameters}")
+        
+        # Handle complaint submission
+        if intent_name == "SubmitComplaint" or "complaint" in intent_name.lower():
+            # Generate complaint ID
+            complaint_id = f"CYB{random.randint(100000, 999999)}"
+            
+            # Prepare complaint data
+            complaint_data = {
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'complaint_id': complaint_id,
+                'name': parameters.get('person-name', ''),
+                'email': parameters.get('email', ''),
+                'phone': parameters.get('phone-number', ''),
+                'crime_type': parameters.get('crime-type', ''),
+                'description': parameters.get('description', ''),
+                'amount_lost': parameters.get('amount', ''),
+                'location': parameters.get('location', ''),
+                'suspect_info': parameters.get('suspect-info', ''),
+                'evidence': parameters.get('evidence', ''),
+                'status': 'Submitted'
+            }
+            
+            # Save to Google Sheets
+            if save_to_sheets(complaint_data):
+                response_text = f"Thank you! Your complaint has been registered successfully.\n\n" \
+                              f"🔍 **Complaint ID:** {complaint_id}\n" \
+                              f"📅 **Date:** {complaint_data['timestamp']}\n" \
+                              f"📋 **Status:** Under Review\n\n" \
+                              f"You will receive updates on your registered email address. " \
+                              f"Please save your Complaint ID for future reference."
+            else:
+                response_text = f"Your complaint has been registered with ID: {complaint_id}. " \
+                              f"However, there was an issue saving to our database. " \
+                              f"Please contact support with this ID."
+            
+            return jsonify({
+                'fulfillmentText': response_text
+            })
+        
+        # Default response for other intents
+        return jsonify({
+            'fulfillmentText': 'I can help you report cybercrime incidents. Please provide details about what happened.'
+        })
         
     except Exception as e:
         print(f"Webhook error: {e}")
-        error_text = "Sorry, a technical error occurred while saving your report."
-        return jsonify({"fulfillment_response": {"messages": [{"text": {"text": [error_text]}}]}})
+        return jsonify({
+            'fulfillmentText': 'I encountered an error processing your request. Please try again.'
+        })
 
 # --- 6. Run the App ---
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False)

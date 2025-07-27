@@ -19,8 +19,8 @@ async function sendMessage() {
     addMessageToHistory(messageText, 'user');
     userInput.value = '';
 
-    // IMPORTANT: This URL must point to your ngrok tunnel
-    const backendUrl = 'https://8af13e42769a.ngrok-free.app/chat';
+    // UPDATED: Changed to Railway URL
+    const backendUrl = 'https://web-production-17ca7.up.railway.app/chat';
 
     try {
         const response = await fetch(backendUrl, {
